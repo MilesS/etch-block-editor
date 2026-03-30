@@ -3,7 +3,7 @@
  * Plugin Name: Etch Core Block Editor
  * Plugin URI: https://github.com/MilesS/etch-block-editor
  * Description: Display and edit core Gutenberg blocks inside the Etch visual editor.
- * Version: 1.3.0
+ * Version: 1.3.1
  * Requires PHP: 8.1
  * Author: Miles Sebesta
  * Author URI: https://milessebesta.com

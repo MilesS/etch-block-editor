@@ -4,7 +4,7 @@ Tags: etch, gutenberg, blocks, editor
 Requires at least: 5.9
 Tested up to: 6.9
 Requires PHP: 8.1
-Stable tag: 1.3.0
+Stable tag: 1.3.1
 License: GPLv2 or later
 
 Display, edit, insert, and convert core Gutenberg blocks directly inside the Etch visual editor.
@@ -20,6 +20,9 @@ Features:
 * Batch convert all convertible blocks on a page
 
 == Changelog ==
+
+= 1.3.1 =
+* Version bump test
 
 = 1.3.0 =
 * Initial public release
