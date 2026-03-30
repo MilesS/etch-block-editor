@@ -5,8 +5,8 @@
  * Description: Display and edit core Gutenberg blocks inside the Etch visual editor.
  * Version: 1.3.0
  * Requires PHP: 8.1
- * Author: Miles
- * Author URI: https://github.com/MilesS
+ * Author: Miles Sebesta
+ * Author URI: https://milessebesta.com
  * License: GPLv2 or later
  * Update URI: https://github.com/MilesS/etch-block-editor
  */

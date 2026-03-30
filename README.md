@@ -1,5 +1,7 @@
 # Etch Block Editor
 
+> **Disclaimer:** This plugin is provided as-is with no warranty. It is not affiliated with or endorsed by the Etch team. Use at your own risk. Always back up your site before converting blocks.
+
 A WordPress plugin that makes core Gutenberg blocks visible, editable, insertable, and convertible inside the [Etch](https://etchwp.com) visual editor.
 
 Etch is a powerful visual development environment for WordPress, but its editor canvas shows core Gutenberg blocks (paragraphs, headings, lists, images, etc.) as opaque placeholders. This plugin fixes that.
@@ -87,6 +89,6 @@ npm run build
 
 GPLv2 or later. See [LICENSE](https://www.gnu.org/licenses/gpl-2.0.html).
 
-## Disclaimer
+## Author
 
-This plugin is provided as-is with no warranty. It is not affiliated with or endorsed by the Etch team. Use at your own risk. Always back up your site before converting blocks.
+Built by [Miles Sebesta](https://milessebesta.com)
