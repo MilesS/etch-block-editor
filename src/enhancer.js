@@ -89,20 +89,11 @@ export function initPassthroughEnhancer(iframe) {
 
 async function fetchAndEnhance(iframeDoc, postId, restUrl, nonce) {
     try {
-        let data = null;
-        for (const type of ['pages', 'posts']) {
-            try {
-                const response = await fetch(`${restUrl}wp/v2/${type}/${postId}?context=edit`, {
-                    headers: { 'X-WP-Nonce': nonce }
-                });
-                if (response.ok) {
-                    data = await response.json();
-                    break;
-                }
-            } catch (e) {
-                continue;
-            }
-        }
+        const restBase = window.etchCoreBlockEditor?.restBase || 'posts';
+        const response = await fetch(`${restUrl}wp/v2/${restBase}/${postId}?context=edit`, {
+            headers: { 'X-WP-Nonce': nonce }
+        });
+        const data = response.ok ? await response.json() : null;
 
         if (!data?.content?.raw) {
             console.warn('[etch-core-block-editor] Could not fetch post content');

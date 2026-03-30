@@ -151,34 +151,21 @@ function addInserterButton(postId, restUrl, nonce) {
 
 async function insertBlock(blockMarkup, postId, restUrl, nonce) {
     try {
-        // Fetch current post content
-        let data = null;
-        let postType = null;
-        for (const type of ['pages', 'posts']) {
-            try {
-                const response = await fetch(`${restUrl}wp/v2/${type}/${postId}?context=edit`, {
-                    headers: { 'X-WP-Nonce': nonce }
-                });
-                if (response.ok) {
-                    data = await response.json();
-                    postType = type;
-                    break;
-                }
-            } catch (e) {
-                continue;
-            }
-        }
+        const restBase = window.etchCoreBlockEditor?.restBase || 'posts';
+        const response = await fetch(`${restUrl}wp/v2/${restBase}/${postId}?context=edit`, {
+            headers: { 'X-WP-Nonce': nonce }
+        });
+        const data = response.ok ? await response.json() : null;
 
         if (!data?.content?.raw) {
             console.error('[etch-core-block-editor] Could not fetch post content for insertion');
             return;
         }
 
-        // Append the new block to the end of existing content
         const newContent = data.content.raw.trim() + '\n\n' + blockMarkup;
 
         // Save via WP REST API
-        const saveResp = await fetch(`${restUrl}wp/v2/${postType}/${postId}`, {
+        const saveResp = await fetch(`${restUrl}wp/v2/${restBase}/${postId}`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',

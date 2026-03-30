@@ -361,24 +361,23 @@ function addConverterButton(postId, restUrl, nonce) {
 // ---- Fetch helper ----
 
 async function fetchPostContent(restUrl, nonce, postId) {
-    for (const type of ['pages', 'posts']) {
-        try {
-            const response = await fetch(restUrl + 'wp/v2/' + type + '/' + postId + '?context=edit', {
-                headers: { 'X-WP-Nonce': nonce }
-            });
-            if (response.ok) {
-                const data = await response.json();
-                return { content: data.content?.raw, postType: type };
-            }
-        } catch (e) {
-            continue;
+    const restBase = window.etchCoreBlockEditor?.restBase || 'posts';
+    try {
+        const response = await fetch(restUrl + 'wp/v2/' + restBase + '/' + postId + '?context=edit', {
+            headers: { 'X-WP-Nonce': nonce }
+        });
+        if (response.ok) {
+            const data = await response.json();
+            return { content: data.content?.raw, restBase };
         }
+    } catch (e) {
+        // fall through
     }
-    return { content: null, postType: null };
+    return { content: null, restBase };
 }
 
-async function saveAndReload(restUrl, nonce, postId, postType, newContent) {
-    const saveResp = await fetch(restUrl + 'wp/v2/' + postType + '/' + postId, {
+async function saveAndReload(restUrl, nonce, postId, restBase, newContent) {
+    const saveResp = await fetch(restUrl + 'wp/v2/' + restBase + '/' + postId, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -432,7 +431,7 @@ async function convertSelectedBlock(postId, restUrl, nonce) {
         coreBlockMarkup = generator(innerHTMLContent);
     }
 
-    const { content, postType } = await fetchPostContent(restUrl, nonce, postId);
+    const { content, restBase } = await fetchPostContent(restUrl, nonce, postId);
     if (!content) {
         showNotice('Could not fetch post content');
         return;
@@ -446,13 +445,13 @@ async function convertSelectedBlock(postId, restUrl, nonce) {
         return;
     }
 
-    await saveAndReload(restUrl, nonce, postId, postType, newContent);
+    await saveAndReload(restUrl, nonce, postId, restBase, newContent);
 }
 
 // ---- Convert All ----
 
 async function convertAllBlocks(postId, restUrl, nonce) {
-    const { content, postType } = await fetchPostContent(restUrl, nonce, postId);
+    const { content, restBase } = await fetchPostContent(restUrl, nonce, postId);
     if (!content) {
         showNotice('Could not fetch post content');
         return;
@@ -466,7 +465,7 @@ async function convertAllBlocks(postId, restUrl, nonce) {
     }
 
     showNotice('Converting ' + result.count + ' block' + (result.count > 1 ? 's' : '') + '...');
-    await saveAndReload(restUrl, nonce, postId, postType, result.content);
+    await saveAndReload(restUrl, nonce, postId, restBase, result.content);
 }
 
 // ---- Block replacement (single) ----
