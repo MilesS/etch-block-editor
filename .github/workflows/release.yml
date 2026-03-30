@@ -1,0 +1,54 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies and build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+
+      - name: Install Composer dependencies
+        run: composer install --no-dev --optimize-autoloader
+
+      - name: Create release zip
+        run: |
+          # Create a clean directory with only needed files
+          mkdir -p /tmp/etch-core-block-editor
+
+          # Copy plugin files
+          cp etch-core-block-editor.php /tmp/etch-core-block-editor/
+          cp -r build /tmp/etch-core-block-editor/
+          cp -r vendor /tmp/etch-core-block-editor/
+
+          # Create zip
+          cd /tmp
+          zip -r etch-core-block-editor.zip etch-core-block-editor/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: /tmp/etch-core-block-editor.zip
+          generate_release_notes: true

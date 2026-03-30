@@ -1,0 +1,7 @@
+/* Styles are injected directly into the iframe via JS.
+   This file handles any main-page styles if needed. */
+
+/* Hide our script from Etch's UI */
+#etch-core-block-editor-js-extra {
+    display: none;
+}
