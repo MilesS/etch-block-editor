@@ -42,6 +42,7 @@ jobs:
           cp etch-core-block-editor.php /tmp/etch-core-block-editor/
           cp -r build /tmp/etch-core-block-editor/
           cp -r vendor /tmp/etch-core-block-editor/
+          cp -r assets /tmp/etch-core-block-editor/
 
           # Create zip
           cd /tmp
