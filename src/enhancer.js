@@ -314,42 +314,11 @@ function injectIframeStyles(iframeDoc) {
 
         .etch-core-preview {
             min-height: 1em;
-            font-size: 16px;
-            line-height: 1.6;
-            color: #1a1a1a;
+            color: inherit;
         }
 
         .etch-core-preview:focus {
             outline: none;
-        }
-
-        .etch-core-preview p {
-            margin: 0 0 0.5em;
-            font-size: 16px;
-            line-height: 1.6;
-        }
-
-        .etch-core-preview p:last-child {
-            margin-bottom: 0;
-        }
-
-        .etch-core-preview h1, .etch-core-preview h2, .etch-core-preview h3,
-        .etch-core-preview h4, .etch-core-preview h5, .etch-core-preview h6 {
-            margin: 0 0 0.3em;
-            color: #1a1a1a;
-        }
-
-        .etch-core-preview ul, .etch-core-preview ol {
-            margin: 0 0 0.5em;
-            padding-left: 1.5em;
-            font-size: 16px;
-        }
-
-        .etch-core-preview blockquote {
-            margin: 0 0 0.5em;
-            padding-left: 1em;
-            border-left: 3px solid rgba(100, 100, 255, 0.3);
-            font-style: italic;
         }
 
         .etch-core-preview img { max-width: 100%; height: auto; }
