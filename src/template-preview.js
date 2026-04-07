@@ -1,20 +1,25 @@
 /**
  * Template Preview — shows the surrounding template context (header, footer, etc.)
  * when editing a post, and provides an "Edit Template" navigation button.
+ *
+ * Strategy: load the real frontend page in a background iframe positioned behind
+ * the Etch iframe. Make the Etch iframe background transparent so the template
+ * shows through. Hide the content area in the background iframe so it doesn't
+ * double up with the editable content. This never touches the Etch iframe DOM
+ * so all Svelte bindings and editability stay intact.
  */
 
 const STORAGE_KEY = 'etch-core-template-preview';
 
-let templateShellCache = null;
+let templatePermalink = null;
 let isPreviewActive = false;
+let bgIframe = null;
 
 export function initTemplatePreview() {
     const config = window.etchCoreBlockEditor || {};
     const { postId, restUrl, nonce, isTemplate } = config;
 
     if (!postId) return;
-
-    // Don't show template controls when already editing a template
     if (isTemplate) return;
 
     waitForEtchControls().then(() => {
@@ -87,48 +92,33 @@ function addTemplateToggle(postId, restUrl, nonce) {
 }
 
 async function enablePreview(postId, restUrl, nonce) {
-    const iframe = document.getElementById('etch-iframe');
-    if (!iframe?.contentDocument?.body) return;
+    const etchIframe = document.getElementById('etch-iframe');
+    if (!etchIframe) return;
 
-    const iframeDoc = iframe.contentDocument;
-
-    if (!templateShellCache) {
-        // Step 1: get the preview permalink from our REST endpoint
+    // Get the permalink for the template preview
+    if (!templatePermalink) {
         const shellInfo = await fetchTemplateShell(postId, restUrl, nonce);
         if (!shellInfo?.permalink) {
             showNotice('No template found for this post');
             return;
         }
-
-        // Step 2: fetch the actual rendered frontend page
-        try {
-            const pageResponse = await fetch(shellInfo.permalink, {
-                credentials: 'same-origin',
-            });
-            if (!pageResponse.ok) {
-                showNotice('Failed to load template preview');
-                return;
-            }
-            const pageHtml = await pageResponse.text();
-            templateShellCache = { html: pageHtml, ...shellInfo };
-        } catch (err) {
-            console.error('[etch-core-block-editor] Failed to fetch template page:', err);
-            showNotice('Failed to load template preview');
-            return;
-        }
+        templatePermalink = shellInfo.permalink;
     }
 
     isPreviewActive = true;
     localStorage.setItem(STORAGE_KEY, 'true');
 
-    injectTemplateShell(iframeDoc, templateShellCache);
+    createBackgroundIframe(etchIframe, templatePermalink);
+    makeEtchIframeTransparent(etchIframe);
     updateToggleButton(true);
 }
 
 function disablePreview() {
-    const iframe = document.getElementById('etch-iframe');
-    if (iframe?.contentDocument) {
-        removeTemplateShell(iframe.contentDocument);
+    const etchIframe = document.getElementById('etch-iframe');
+
+    removeBackgroundIframe();
+    if (etchIframe) {
+        restoreEtchIframe(etchIframe);
     }
 
     isPreviewActive = false;
@@ -143,264 +133,115 @@ function updateToggleButton(active) {
     }
 }
 
-// ---- Template Shell Injection ----
+// ---- Background Iframe ----
 
-/**
- * Strategy: NEVER move the original editable content nodes — Etch's Svelte
- * bindings and event listeners are attached to them and break if moved.
- *
- * Instead we:
- * 1. Parse the fetched frontend page
- * 2. Find the #etch-content-marker
- * 3. Walk up from the marker to <body> to get the wrapper chain (e.g. body > main#main > div.entry-content > marker)
- * 4. For each level in that chain, collect sibling nodes that come before/after the relevant child
- * 5. In the iframe: recreate the wrapper chain around the existing content, inject siblings at each level
- *
- * Result: original editable nodes stay in place, but get wrapped in the correct
- * template DOM structure with header/footer/sidebar as siblings.
- */
+function createBackgroundIframe(etchIframe, permalink) {
+    removeBackgroundIframe();
 
-function injectTemplateShell(iframeDoc, shell) {
-    removeTemplateShell(iframeDoc);
-    injectPreviewStyles(iframeDoc);
+    // Find the container that holds the etch iframe
+    const container = etchIframe.parentElement;
+    if (!container) return;
 
-    // Parse the fetched full page HTML
-    const parser = new DOMParser();
-    const fetchedDoc = parser.parseFromString(shell.html, 'text/html');
+    bgIframe = document.createElement('iframe');
+    bgIframe.id = 'etch-template-bg-iframe';
+    bgIframe.src = permalink;
+    bgIframe.style.cssText = [
+        'position: absolute',
+        'top: 0',
+        'left: 0',
+        'width: 100%',
+        'height: 100%',
+        'border: none',
+        'pointer-events: none',
+        'z-index: 0',
+    ].join(';');
 
-    // Inject all stylesheets from the fetched page
-    const headStyles = fetchedDoc.querySelectorAll('link[rel="stylesheet"], style');
-    headStyles.forEach(el => {
-        const clone = iframeDoc.importNode(el, true);
-        clone.setAttribute('data-etch-template-style', 'true');
-        iframeDoc.head.appendChild(clone);
+    // Ensure the container is positioned
+    const containerPos = getComputedStyle(container).position;
+    if (containerPos === 'static') {
+        container.style.position = 'relative';
+        container.setAttribute('data-etch-template-positioned', 'true');
+    }
+
+    // Insert before the etch iframe so it's behind
+    container.insertBefore(bgIframe, etchIframe);
+
+    // Ensure etch iframe is above
+    etchIframe.style.position = 'relative';
+    etchIframe.style.zIndex = '1';
+
+    // When bg iframe loads, hide the content area and sync scrolling
+    bgIframe.addEventListener('load', () => {
+        const bgDoc = bgIframe.contentDocument;
+        if (!bgDoc) return;
+
+        // Hide the content marker area so it doesn't double up
+        const marker = bgDoc.getElementById('etch-content-marker');
+        if (marker) {
+            marker.style.visibility = 'hidden';
+        }
+
+        // Dim template parts slightly
+        const style = bgDoc.createElement('style');
+        style.textContent = `
+            body { opacity: 0.55; }
+            #etch-content-marker { visibility: hidden; }
+        `;
+        bgDoc.head.appendChild(style);
+
+        // Sync scroll position between etch iframe and bg iframe
+        setupScrollSync(etchIframe, bgIframe);
     });
-
-    // Find the content marker
-    const marker = fetchedDoc.getElementById('etch-content-marker');
-    if (!marker) {
-        console.warn('[etch-core-block-editor] No content marker found in template page');
-        return;
-    }
-
-    // Build the wrapper chain from marker up to body
-    // Each entry: { element, beforeSiblings[], afterSiblings[] }
-    const wrapperChain = [];
-    let current = marker;
-    while (current.parentElement && current.parentElement !== fetchedDoc.body) {
-        const parent = current.parentElement;
-        const before = [];
-        const after = [];
-        let foundCurrent = false;
-
-        for (const sibling of parent.childNodes) {
-            if (sibling === current) {
-                foundCurrent = true;
-                continue;
-            }
-            if (!foundCurrent) {
-                before.push(sibling);
-            } else {
-                after.push(sibling);
-            }
-        }
-
-        wrapperChain.push({
-            tag: parent.tagName.toLowerCase(),
-            attrs: Array.from(parent.attributes),
-            before,
-            after,
-        });
-
-        current = parent;
-    }
-
-    // Collect body-level siblings (before/after the outermost wrapper ancestor)
-    const bodyBefore = [];
-    const bodyAfter = [];
-    if (current !== fetchedDoc.body) {
-        let foundCurrent = false;
-        for (const sibling of fetchedDoc.body.childNodes) {
-            if (sibling === current) {
-                foundCurrent = true;
-                continue;
-            }
-            if (!foundCurrent) {
-                bodyBefore.push(sibling);
-            } else {
-                bodyAfter.push(sibling);
-            }
-        }
-    }
-
-    // Now build the structure in the iframe body.
-    // Collect existing editable children (keep references — don't clone)
-    const editableChildren = Array.from(iframeDoc.body.childNodes);
-
-    // Clear the body
-    while (iframeDoc.body.firstChild) {
-        iframeDoc.body.removeChild(iframeDoc.body.firstChild);
-    }
-
-    // Inject body-level "before" siblings (e.g. header)
-    for (const node of bodyBefore) {
-        const imported = iframeDoc.importNode(node, true);
-        imported.setAttribute?.('data-etch-template-part', 'true');
-        iframeDoc.body.appendChild(imported);
-    }
-
-    // Build the wrapper chain from outermost to innermost
-    // wrapperChain is ordered inner-to-outer, so reverse it
-    let innermost = null;
-    let outermost = null;
-
-    // Use a temporary placeholder to mark where the next (inner) level goes
-    const PLACEHOLDER_ID = 'etch-template-nesting-placeholder';
-
-    for (let i = wrapperChain.length - 1; i >= 0; i--) {
-        const level = wrapperChain[i];
-        const wrapper = iframeDoc.createElement(level.tag);
-
-        // Copy attributes (id, class, style, data-* etc.)
-        for (const attr of level.attrs) {
-            wrapper.setAttribute(attr.name, attr.value);
-        }
-        wrapper.setAttribute('data-etch-template-wrapper', 'true');
-
-        // Inject "before" siblings at this level
-        for (const node of level.before) {
-            const imported = iframeDoc.importNode(node, true);
-            imported.setAttribute?.('data-etch-template-part', 'true');
-            wrapper.appendChild(imported);
-        }
-
-        // Add a temporary placeholder comment to mark where content/next level goes
-        const placeholder = iframeDoc.createComment(PLACEHOLDER_ID);
-        wrapper.appendChild(placeholder);
-
-        // Inject "after" siblings at this level
-        for (const node of level.after) {
-            const imported = iframeDoc.importNode(node, true);
-            imported.setAttribute?.('data-etch-template-part', 'true');
-            wrapper.appendChild(imported);
-        }
-
-        if (!outermost) {
-            outermost = wrapper;
-        }
-        if (innermost) {
-            // Replace the placeholder in the previous (outer) wrapper with this wrapper
-            const walk = iframeDoc.createTreeWalker(innermost, NodeFilter.SHOW_COMMENT);
-            while (walk.nextNode()) {
-                if (walk.currentNode.nodeValue === PLACEHOLDER_ID) {
-                    walk.currentNode.replaceWith(wrapper);
-                    break;
-                }
-            }
-        }
-        innermost = wrapper;
-    }
-
-    // Put the editable content directly into the innermost wrapper (no extra slot div)
-    if (innermost) {
-        // Find the placeholder in the innermost wrapper and replace with editable children
-        const walk = iframeDoc.createTreeWalker(innermost, NodeFilter.SHOW_COMMENT);
-        let placeholderNode = null;
-        while (walk.nextNode()) {
-            if (walk.currentNode.nodeValue === PLACEHOLDER_ID) {
-                placeholderNode = walk.currentNode;
-                break;
-            }
-        }
-
-        if (placeholderNode) {
-            // Insert each editable child before the placeholder, then remove it
-            for (const child of editableChildren) {
-                placeholderNode.parentNode.insertBefore(child, placeholderNode);
-            }
-            placeholderNode.remove();
-        }
-
-        // Mark the innermost wrapper so we can find editable children on removal
-        innermost.setAttribute('data-etch-template-innermost', 'true');
-
-        iframeDoc.body.appendChild(outermost);
-    } else {
-        // No wrapper chain — just put content back
-        for (const child of editableChildren) {
-            iframeDoc.body.appendChild(child);
-        }
-    }
-
-    // Inject body-level "after" siblings (e.g. footer)
-    for (const node of bodyAfter) {
-        const imported = iframeDoc.importNode(node, true);
-        imported.setAttribute?.('data-etch-template-part', 'true');
-        iframeDoc.body.appendChild(imported);
-    }
 }
 
-function removeTemplateShell(iframeDoc) {
-    const previewStyles = iframeDoc.getElementById('etch-template-preview-styles');
-    if (previewStyles) previewStyles.remove();
+function removeBackgroundIframe() {
+    if (bgIframe) {
+        const container = bgIframe.parentElement;
+        bgIframe.remove();
+        bgIframe = null;
 
-    // Remove injected template stylesheets from head
-    iframeDoc.head.querySelectorAll('[data-etch-template-style]').forEach(el => el.remove());
-
-    // Find the innermost wrapper that holds the editable content
-    const innermost = iframeDoc.querySelector('[data-etch-template-innermost]');
-    if (innermost) {
-        // Collect editable children (everything not marked as template part)
-        const editableChildren = Array.from(innermost.childNodes).filter(node => {
-            if (node.nodeType !== 1) return true; // text/comment nodes are editable
-            return !node.hasAttribute('data-etch-template-part');
-        });
-
-        // Remove all template content from body
-        while (iframeDoc.body.firstChild) {
-            iframeDoc.body.removeChild(iframeDoc.body.firstChild);
-        }
-
-        // Restore editable children directly to body
-        for (const child of editableChildren) {
-            iframeDoc.body.appendChild(child);
+        // Restore container positioning if we set it
+        if (container?.hasAttribute('data-etch-template-positioned')) {
+            container.style.position = '';
+            container.removeAttribute('data-etch-template-positioned');
         }
     }
 }
 
-function injectPreviewStyles(iframeDoc) {
-    if (iframeDoc.getElementById('etch-template-preview-styles')) return;
+function makeEtchIframeTransparent(etchIframe) {
+    const iframeDoc = etchIframe.contentDocument;
+    if (!iframeDoc) return;
 
+    // Make body background transparent so bg iframe shows through
     const style = iframeDoc.createElement('style');
-    style.id = 'etch-template-preview-styles';
+    style.id = 'etch-template-transparent-style';
     style.textContent = `
-        /* Template parts are non-interactive and visually dimmed */
-        [data-etch-template-part] {
-            pointer-events: none !important;
-            opacity: 0.55;
-            transition: opacity 0.2s ease;
-            position: relative;
-        }
-
-        [data-etch-template-part]:hover {
-            opacity: 0.75;
-        }
-
-        [data-etch-template-part] a,
-        [data-etch-template-part] button {
-            pointer-events: none !important;
-            cursor: default !important;
-        }
-
-        [data-etch-template-part] img { max-width: 100%; height: auto; }
-        [data-etch-template-part] video { max-width: 100%; height: auto; }
-
-        /* Innermost wrapper that holds editable content */
-        [data-etch-template-innermost] {
-            position: relative;
+        html, body {
+            background: transparent !important;
         }
     `;
     iframeDoc.head.appendChild(style);
+}
+
+function restoreEtchIframe(etchIframe) {
+    etchIframe.style.position = '';
+    etchIframe.style.zIndex = '';
+
+    const iframeDoc = etchIframe.contentDocument;
+    if (iframeDoc) {
+        const style = iframeDoc.getElementById('etch-template-transparent-style');
+        if (style) style.remove();
+    }
+}
+
+function setupScrollSync(etchIframe, bgIframe) {
+    const etchWin = etchIframe.contentWindow;
+    const bgWin = bgIframe.contentWindow;
+    if (!etchWin || !bgWin) return;
+
+    etchWin.addEventListener('scroll', () => {
+        bgWin.scrollTo(etchWin.scrollX, etchWin.scrollY);
+    });
 }
 
 // ---- API Calls ----
