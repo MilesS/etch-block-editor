@@ -2,18 +2,17 @@
  * Template Preview — shows the surrounding template context (header, footer, etc.)
  * when editing a post, and provides an "Edit Template" navigation button.
  *
- * Strategy: load the real frontend page in a background iframe positioned behind
- * the Etch iframe. Make the Etch iframe background transparent so the template
- * shows through. Hide the content area in the background iframe so it doesn't
- * double up with the editable content. This never touches the Etch iframe DOM
- * so all Svelte bindings and editability stay intact.
+ * Strategy: fetch the real rendered frontend page HTML, parse it, swap the
+ * content marker with the live editable nodes (move, not clone — preserves
+ * all event listeners and Svelte bindings), and replace the iframe body.
+ *
+ * On disable: pull editable nodes back out to body root and remove template.
  */
 
 const STORAGE_KEY = 'etch-core-template-preview';
 
-let templatePermalink = null;
+let templateHtmlCache = null;
 let isPreviewActive = false;
-let bgIframe = null;
 
 export function initTemplatePreview() {
     const config = window.etchCoreBlockEditor || {};
@@ -93,32 +92,37 @@ function addTemplateToggle(postId, restUrl, nonce) {
 
 async function enablePreview(postId, restUrl, nonce) {
     const etchIframe = document.getElementById('etch-iframe');
-    if (!etchIframe) return;
+    if (!etchIframe?.contentDocument?.body) return;
 
-    // Get the permalink for the template preview
-    if (!templatePermalink) {
+    if (!templateHtmlCache) {
         const shellInfo = await fetchTemplateShell(postId, restUrl, nonce);
         if (!shellInfo?.permalink) {
             showNotice('No template found for this post');
             return;
         }
-        templatePermalink = shellInfo.permalink;
+
+        try {
+            const resp = await fetch(shellInfo.permalink, { credentials: 'same-origin' });
+            if (!resp.ok) { showNotice('Failed to load template preview'); return; }
+            templateHtmlCache = await resp.text();
+        } catch (err) {
+            console.error('[etch-core-block-editor] Failed to fetch template page:', err);
+            showNotice('Failed to load template preview');
+            return;
+        }
     }
 
     isPreviewActive = true;
     localStorage.setItem(STORAGE_KEY, 'true');
 
-    createBackgroundIframe(etchIframe, templatePermalink);
-    makeEtchIframeTransparent(etchIframe);
+    injectTemplate(etchIframe.contentDocument);
     updateToggleButton(true);
 }
 
 function disablePreview() {
     const etchIframe = document.getElementById('etch-iframe');
-
-    removeBackgroundIframe();
-    if (etchIframe) {
-        restoreEtchIframe(etchIframe);
+    if (etchIframe?.contentDocument) {
+        removeTemplate(etchIframe.contentDocument);
     }
 
     isPreviewActive = false;
@@ -133,115 +137,158 @@ function updateToggleButton(active) {
     }
 }
 
-// ---- Background Iframe ----
+// ---- Template Injection ----
 
-function createBackgroundIframe(etchIframe, permalink) {
-    removeBackgroundIframe();
+function injectTemplate(iframeDoc) {
+    removeTemplate(iframeDoc);
 
-    // Find the container that holds the etch iframe
-    const container = etchIframe.parentElement;
-    if (!container) return;
+    // Grab references to the live editable nodes BEFORE detaching
+    const editableNodes = Array.from(iframeDoc.body.childNodes);
 
-    bgIframe = document.createElement('iframe');
-    bgIframe.id = 'etch-template-bg-iframe';
-    bgIframe.src = permalink;
-    bgIframe.style.cssText = [
-        'position: absolute',
-        'top: 0',
-        'left: 0',
-        'width: 100%',
-        'height: 100%',
-        'border: none',
-        'pointer-events: none',
-        'z-index: 0',
-    ].join(';');
+    // Parse the fetched page
+    const parser = new DOMParser();
+    const fetchedDoc = parser.parseFromString(templateHtmlCache, 'text/html');
 
-    // Ensure the container is positioned
-    const containerPos = getComputedStyle(container).position;
-    if (containerPos === 'static') {
-        container.style.position = 'relative';
-        container.setAttribute('data-etch-template-positioned', 'true');
-    }
-
-    // Insert before the etch iframe so it's behind
-    container.insertBefore(bgIframe, etchIframe);
-
-    // Ensure etch iframe is above
-    etchIframe.style.position = 'relative';
-    etchIframe.style.zIndex = '1';
-
-    // When bg iframe loads, hide the content area and sync scrolling
-    bgIframe.addEventListener('load', () => {
-        const bgDoc = bgIframe.contentDocument;
-        if (!bgDoc) return;
-
-        // Hide the content marker area so it doesn't double up
-        const marker = bgDoc.getElementById('etch-content-marker');
-        if (marker) {
-            marker.style.visibility = 'hidden';
-        }
-
-        // Dim template parts slightly
-        const style = bgDoc.createElement('style');
-        style.textContent = `
-            body { opacity: 0.55; }
-            #etch-content-marker { visibility: hidden; }
-        `;
-        bgDoc.head.appendChild(style);
-
-        // Sync scroll position between etch iframe and bg iframe
-        setupScrollSync(etchIframe, bgIframe);
+    // Inject stylesheets from fetched page into iframe head
+    fetchedDoc.querySelectorAll('link[rel="stylesheet"], style').forEach(el => {
+        const clone = iframeDoc.importNode(el, true);
+        clone.setAttribute('data-etch-template-style', 'true');
+        iframeDoc.head.appendChild(clone);
     });
+
+    // Import the fetched body content into the iframe's document
+    // (importNode with deep=true to bring all template nodes across)
+    const importedBody = iframeDoc.importNode(fetchedDoc.body, true);
+
+    // Find the content marker in the imported tree
+    const marker = importedBody.querySelector('#etch-content-marker');
+
+    // Clear the iframe body
+    while (iframeDoc.body.firstChild) {
+        // Detach but keep references in editableNodes
+        iframeDoc.body.removeChild(iframeDoc.body.firstChild);
+    }
+
+    // Copy body classes from fetched page
+    if (fetchedDoc.body.className) {
+        iframeDoc.body.setAttribute('data-etch-template-body-class', iframeDoc.body.className);
+        iframeDoc.body.className = fetchedDoc.body.className;
+    }
+
+    // Move all imported children into the iframe body
+    while (importedBody.firstChild) {
+        iframeDoc.body.appendChild(importedBody.firstChild);
+    }
+
+    // Now find the marker in the live iframe body and replace with editable nodes
+    const liveMarker = iframeDoc.getElementById('etch-content-marker');
+    if (liveMarker) {
+        // Insert each editable node before the marker (this MOVES them, preserving bindings)
+        for (const node of editableNodes) {
+            liveMarker.parentNode.insertBefore(node, liveMarker);
+        }
+        // Remove the marker itself
+        liveMarker.remove();
+    }
+
+    // Mark template parts (everything except editable nodes and their ancestors)
+    const editableSet = new Set(editableNodes.filter(n => n.nodeType === 1));
+    iframeDoc.body.querySelectorAll('*').forEach(el => {
+        // Skip if it's one of the editable nodes or inside one
+        for (const editable of editableSet) {
+            if (el === editable || editable.contains(el)) return;
+        }
+        // Skip ancestors of editable nodes
+        for (const editable of editableSet) {
+            if (el.contains(editable)) return;
+        }
+        el.setAttribute('data-etch-template-part', 'true');
+    });
+
+    // Inject our preview styles
+    injectPreviewStyles(iframeDoc);
 }
 
-function removeBackgroundIframe() {
-    if (bgIframe) {
-        const container = bgIframe.parentElement;
-        bgIframe.remove();
-        bgIframe = null;
+function removeTemplate(iframeDoc) {
+    // Remove preview styles
+    const previewStyles = iframeDoc.getElementById('etch-template-preview-styles');
+    if (previewStyles) previewStyles.remove();
 
-        // Restore container positioning if we set it
-        if (container?.hasAttribute('data-etch-template-positioned')) {
-            container.style.position = '';
-            container.removeAttribute('data-etch-template-positioned');
+    // Remove injected stylesheets
+    iframeDoc.head.querySelectorAll('[data-etch-template-style]').forEach(el => el.remove());
+
+    // Find editable nodes (everything NOT marked as template part, direct or nested)
+    const allNodes = Array.from(iframeDoc.body.childNodes);
+    const editableNodes = [];
+
+    function collectEditableNodes(parent) {
+        for (const node of Array.from(parent.childNodes)) {
+            if (node.nodeType !== 1) {
+                // Text/comment nodes at body level — skip template whitespace
+                if (node.parentElement === iframeDoc.body && node.nodeType === 3 && !node.textContent.trim()) {
+                    continue;
+                }
+                if (!node.parentElement?.hasAttribute('data-etch-template-part')) {
+                    editableNodes.push(node);
+                }
+                continue;
+            }
+            if (!node.hasAttribute('data-etch-template-part')) {
+                editableNodes.push(node);
+            } else if (node.querySelector(':not([data-etch-template-part])')) {
+                // This template part contains editable descendants — recurse
+                collectEditableNodes(node);
+            }
         }
+    }
+
+    collectEditableNodes(iframeDoc.body);
+
+    // If no editable nodes found, don't wipe the body
+    if (editableNodes.length === 0) return;
+
+    // Restore original body class
+    const savedClass = iframeDoc.body.getAttribute('data-etch-template-body-class');
+    if (savedClass !== null) {
+        iframeDoc.body.className = savedClass;
+        iframeDoc.body.removeAttribute('data-etch-template-body-class');
+    }
+
+    // Clear body and restore only editable nodes
+    while (iframeDoc.body.firstChild) {
+        iframeDoc.body.removeChild(iframeDoc.body.firstChild);
+    }
+    for (const node of editableNodes) {
+        iframeDoc.body.appendChild(node);
     }
 }
 
-function makeEtchIframeTransparent(etchIframe) {
-    const iframeDoc = etchIframe.contentDocument;
-    if (!iframeDoc) return;
+function injectPreviewStyles(iframeDoc) {
+    if (iframeDoc.getElementById('etch-template-preview-styles')) return;
 
-    // Make body background transparent so bg iframe shows through
     const style = iframeDoc.createElement('style');
-    style.id = 'etch-template-transparent-style';
+    style.id = 'etch-template-preview-styles';
     style.textContent = `
-        html, body {
-            background: transparent !important;
+        [data-etch-template-part] {
+            pointer-events: none !important;
+            opacity: 0.55;
+            transition: opacity 0.2s ease;
         }
+
+        [data-etch-template-part]:hover {
+            opacity: 0.75;
+        }
+
+        [data-etch-template-part] a,
+        [data-etch-template-part] button {
+            pointer-events: none !important;
+            cursor: default !important;
+        }
+
+        [data-etch-template-part] img { max-width: 100%; height: auto; }
+        [data-etch-template-part] video { max-width: 100%; height: auto; }
     `;
     iframeDoc.head.appendChild(style);
-}
-
-function restoreEtchIframe(etchIframe) {
-    etchIframe.style.position = '';
-    etchIframe.style.zIndex = '';
-
-    const iframeDoc = etchIframe.contentDocument;
-    if (iframeDoc) {
-        const style = iframeDoc.getElementById('etch-template-transparent-style');
-        if (style) style.remove();
-    }
-}
-
-function setupScrollSync(etchIframe, bgIframe) {
-    const etchWin = etchIframe.contentWindow;
-    const bgWin = bgIframe.contentWindow;
-    if (!etchWin || !bgWin) return;
-
-    etchWin.addEventListener('scroll', () => {
-        bgWin.scrollTo(etchWin.scrollX, etchWin.scrollY);
-    });
 }
 
 // ---- API Calls ----
