@@ -4,7 +4,7 @@ Tags: etch, gutenberg, blocks, editor
 Requires at least: 5.9
 Tested up to: 6.9
 Requires PHP: 8.1
-Stable tag: 1.5.1
+Stable tag: 1.6.0
 License: GPLv2 or later
 
 Display, edit, insert, and convert core Gutenberg blocks directly inside the Etch visual editor.
@@ -18,8 +18,17 @@ Features:
 * Insert new core blocks (paragraph, headings, buttons, post navigation links) without leaving Etch
 * Convert etch/element blocks to core Gutenberg blocks (p, h1-h6, img, ul, ol)
 * Batch convert all convertible blocks on a page
+* Toggle template preview to see header/footer/layout context while editing posts
+* Navigate directly to a post's template for editing
 
 == Changelog ==
+
+= 1.6.0 =
+* Add template preview toggle — show header/footer/layout context while editing posts
+* Add "Edit Template" button to navigate directly to the post's template
+* New REST endpoints for template resolution and shell rendering
+* Template hierarchy support (single-{type}, single, singular, page, index)
+* Preview state persisted in localStorage
 
 = 1.5.1 =
 * Fix block enhancement for wp_template post types (pass raw content from PHP)
