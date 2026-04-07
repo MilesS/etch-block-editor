@@ -4,7 +4,7 @@ Tags: etch, gutenberg, blocks, editor
 Requires at least: 5.9
 Tested up to: 6.9
 Requires PHP: 8.1
-Stable tag: 1.6.0
+Stable tag: 1.6.1
 License: GPLv2 or later
 
 Display, edit, insert, and convert core Gutenberg blocks directly inside the Etch visual editor.
@@ -22,6 +22,11 @@ Features:
 * Navigate directly to a post's template for editing
 
 == Changelog ==
+
+= 1.6.1 =
+* Fix template preview content marker not appearing (priority conflict with Etch ContentWrapper)
+* Fix template preview rendering — fetch real frontend page for accurate styles and nesting
+* Fix editability preservation — move original nodes instead of cloning
 
 = 1.6.0 =
 * Add template preview toggle — show header/footer/layout context while editing posts
