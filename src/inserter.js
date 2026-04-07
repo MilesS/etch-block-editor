@@ -12,6 +12,8 @@ const BLOCK_TEMPLATES = {
     'Heading H5': '<!-- wp:heading {"level":5} -->\n<h5 class="wp-block-heading"></h5>\n<!-- /wp:heading -->',
     'Heading H6': '<!-- wp:heading {"level":6} -->\n<h6 class="wp-block-heading"></h6>\n<!-- /wp:heading -->',
     'Button': '<!-- wp:buttons -->\n<div class="wp-block-buttons"><!-- wp:button -->\n<div class="wp-block-button"><a class="wp-block-button__link wp-element-button"></a></div>\n<!-- /wp:button --></div>\n<!-- /wp:buttons -->',
+    'Previous Post Link': '<!-- wp:post-navigation-link {"type":"previous"} /-->',
+    'Next Post Link': '<!-- wp:post-navigation-link /-->',
 };
 
 export function initBlockInserter() {

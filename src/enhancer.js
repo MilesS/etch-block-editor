@@ -151,7 +151,8 @@ function enhanceBlock(element, blockData, postId, restUrl, nonce) {
 
     const preview = document.createElement('div');
     preview.className = 'etch-core-preview';
-    preview.innerHTML = sanitizeHTML(blockData.innerHTML);
+    const previewHTML = getDynamicBlockPreview(blockData) || blockData.innerHTML;
+    preview.innerHTML = sanitizeHTML(previewHTML);
     element.appendChild(preview);
 
     const label = document.createElement('span');
@@ -252,6 +253,35 @@ async function exitEditMode(element, preview, blockData, postId, restUrl, nonce)
     }
 }
 
+/**
+ * Generate a placeholder preview for dynamic (server-rendered) blocks
+ * that have no innerHTML in post_content.
+ */
+function getDynamicBlockPreview(blockData) {
+    if (blockData.innerHTML) return null;
+
+    if (blockData.blockName === 'core/post-navigation-link') {
+        const type = blockData.attrs?.type || 'next';
+        const label = blockData.attrs?.label || '';
+        const arrow = blockData.attrs?.arrow || '';
+        const isPrev = type === 'previous';
+
+        let arrowChar = '';
+        if (arrow === 'arrow') arrowChar = isPrev ? '\u2190 ' : ' \u2192';
+        else if (arrow === 'chevron') arrowChar = isPrev ? '\u2039 ' : ' \u203A';
+
+        const displayLabel = label || (isPrev ? 'Previous Post' : 'Next Post');
+        const inner = isPrev
+            ? arrowChar + displayLabel
+            : displayLabel + arrowChar;
+
+        return '<div class="wp-block-post-navigation-link etch-dynamic-preview">'
+            + '<a>' + inner + '</a></div>';
+    }
+
+    return null;
+}
+
 function reconstructBlockMarkup(blockData, newInnerHTML) {
     const { blockName, attrs } = blockData;
     const attrsStr = attrs && Object.keys(attrs).length > 0
@@ -331,6 +361,21 @@ function injectIframeStyles(iframeDoc) {
             color: #fff;
             text-decoration: none;
             border-radius: 3px;
+        }
+
+        .etch-dynamic-preview {
+            padding: 8px 12px;
+            border: 1px dashed rgba(150, 150, 150, 0.4);
+            border-radius: 4px;
+            font-size: 0.9em;
+            color: inherit;
+            opacity: 0.7;
+        }
+
+        .etch-dynamic-preview a {
+            color: inherit;
+            text-decoration: underline;
+            cursor: default;
         }
 
         .etch-core-label {
