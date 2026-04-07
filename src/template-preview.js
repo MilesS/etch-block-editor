@@ -254,6 +254,9 @@ function injectTemplateShell(iframeDoc, shell) {
     let innermost = null;
     let outermost = null;
 
+    // Use a temporary placeholder to mark where the next (inner) level goes
+    const PLACEHOLDER_ID = 'etch-template-nesting-placeholder';
+
     for (let i = wrapperChain.length - 1; i >= 0; i--) {
         const level = wrapperChain[i];
         const wrapper = iframeDoc.createElement(level.tag);
@@ -271,11 +274,9 @@ function injectTemplateShell(iframeDoc, shell) {
             wrapper.appendChild(imported);
         }
 
-        // Create a slot for the next level (or the content)
-        const slot = iframeDoc.createElement('div');
-        slot.id = 'etch-template-content-slot';
-        slot.setAttribute('data-etch-template-slot', 'true');
-        wrapper.appendChild(slot);
+        // Add a temporary placeholder comment to mark where content/next level goes
+        const placeholder = iframeDoc.createComment(PLACEHOLDER_ID);
+        wrapper.appendChild(placeholder);
 
         // Inject "after" siblings at this level
         for (const node of level.after) {
@@ -288,24 +289,41 @@ function injectTemplateShell(iframeDoc, shell) {
             outermost = wrapper;
         }
         if (innermost) {
-            // Replace the slot in the previous (outer) wrapper with this wrapper
-            const prevSlot = innermost.querySelector('#etch-template-content-slot');
-            if (prevSlot) {
-                prevSlot.replaceWith(wrapper);
+            // Replace the placeholder in the previous (outer) wrapper with this wrapper
+            const walk = iframeDoc.createTreeWalker(innermost, NodeFilter.SHOW_COMMENT);
+            while (walk.nextNode()) {
+                if (walk.currentNode.nodeValue === PLACEHOLDER_ID) {
+                    walk.currentNode.replaceWith(wrapper);
+                    break;
+                }
             }
         }
         innermost = wrapper;
     }
 
-    // Find the innermost slot and put the editable content there
+    // Put the editable content directly into the innermost wrapper (no extra slot div)
     if (innermost) {
-        const finalSlot = innermost.querySelector('#etch-template-content-slot');
-        if (finalSlot) {
-            // Move (not clone!) original editable children into the slot
-            for (const child of editableChildren) {
-                finalSlot.appendChild(child);
+        // Find the placeholder in the innermost wrapper and replace with editable children
+        const walk = iframeDoc.createTreeWalker(innermost, NodeFilter.SHOW_COMMENT);
+        let placeholderNode = null;
+        while (walk.nextNode()) {
+            if (walk.currentNode.nodeValue === PLACEHOLDER_ID) {
+                placeholderNode = walk.currentNode;
+                break;
             }
         }
+
+        if (placeholderNode) {
+            // Insert each editable child before the placeholder, then remove it
+            for (const child of editableChildren) {
+                placeholderNode.parentNode.insertBefore(child, placeholderNode);
+            }
+            placeholderNode.remove();
+        }
+
+        // Mark the innermost wrapper so we can find editable children on removal
+        innermost.setAttribute('data-etch-template-innermost', 'true');
+
         iframeDoc.body.appendChild(outermost);
     } else {
         // No wrapper chain — just put content back
@@ -329,18 +347,22 @@ function removeTemplateShell(iframeDoc) {
     // Remove injected template stylesheets from head
     iframeDoc.head.querySelectorAll('[data-etch-template-style]').forEach(el => el.remove());
 
-    // Pull editable content out of the slot and restore to body root
-    const slot = iframeDoc.getElementById('etch-template-content-slot');
-    if (slot) {
-        const children = Array.from(slot.childNodes);
+    // Find the innermost wrapper that holds the editable content
+    const innermost = iframeDoc.querySelector('[data-etch-template-innermost]');
+    if (innermost) {
+        // Collect editable children (everything not marked as template part)
+        const editableChildren = Array.from(innermost.childNodes).filter(node => {
+            if (node.nodeType !== 1) return true; // text/comment nodes are editable
+            return !node.hasAttribute('data-etch-template-part');
+        });
 
-        // Remove all template injected content
+        // Remove all template content from body
         while (iframeDoc.body.firstChild) {
             iframeDoc.body.removeChild(iframeDoc.body.firstChild);
         }
 
-        // Restore the editable children directly to body
-        for (const child of children) {
+        // Restore editable children directly to body
+        for (const child of editableChildren) {
             iframeDoc.body.appendChild(child);
         }
     }
@@ -373,12 +395,9 @@ function injectPreviewStyles(iframeDoc) {
         [data-etch-template-part] img { max-width: 100%; height: auto; }
         [data-etch-template-part] video { max-width: 100%; height: auto; }
 
-        /* Content slot separator */
-        #etch-template-content-slot {
+        /* Innermost wrapper that holds editable content */
+        [data-etch-template-innermost] {
             position: relative;
-            border-top: 2px dashed rgba(100, 100, 255, 0.25);
-            border-bottom: 2px dashed rgba(100, 100, 255, 0.25);
-            padding: 4px 0;
         }
     `;
     iframeDoc.head.appendChild(style);
