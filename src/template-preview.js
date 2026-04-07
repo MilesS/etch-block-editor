@@ -145,8 +145,20 @@ function updateToggleButton(active) {
 
 // ---- Template Shell Injection ----
 
-// Store original body children so we can restore on disable
-let savedOriginalChildren = null;
+/**
+ * Strategy: NEVER move the original editable content nodes — Etch's Svelte
+ * bindings and event listeners are attached to them and break if moved.
+ *
+ * Instead we:
+ * 1. Parse the fetched frontend page
+ * 2. Find the #etch-content-marker
+ * 3. Walk up from the marker to <body> to get the wrapper chain (e.g. body > main#main > div.entry-content > marker)
+ * 4. For each level in that chain, collect sibling nodes that come before/after the relevant child
+ * 5. In the iframe: recreate the wrapper chain around the existing content, inject siblings at each level
+ *
+ * Result: original editable nodes stay in place, but get wrapped in the correct
+ * template DOM structure with header/footer/sidebar as siblings.
+ */
 
 function injectTemplateShell(iframeDoc, shell) {
     removeTemplateShell(iframeDoc);
@@ -156,7 +168,7 @@ function injectTemplateShell(iframeDoc, shell) {
     const parser = new DOMParser();
     const fetchedDoc = parser.parseFromString(shell.html, 'text/html');
 
-    // Inject all <link rel="stylesheet"> and <style> tags from the fetched page
+    // Inject all stylesheets from the fetched page
     const headStyles = fetchedDoc.querySelectorAll('link[rel="stylesheet"], style');
     headStyles.forEach(el => {
         const clone = iframeDoc.importNode(el, true);
@@ -164,77 +176,150 @@ function injectTemplateShell(iframeDoc, shell) {
         iframeDoc.head.appendChild(clone);
     });
 
-    // Save the original body children (the editable post content)
-    savedOriginalChildren = Array.from(iframeDoc.body.childNodes);
-
-    // Find the content marker in the fetched page body
+    // Find the content marker
     const marker = fetchedDoc.getElementById('etch-content-marker');
-    const fetchedBody = fetchedDoc.body;
+    if (!marker) {
+        console.warn('[etch-core-block-editor] No content marker found in template page');
+        return;
+    }
 
-    if (marker) {
-        // Replace the marker contents with the editable content
-        const contentSlot = iframeDoc.createElement('div');
-        contentSlot.id = 'etch-template-content-slot';
-        for (const child of savedOriginalChildren) {
-            contentSlot.appendChild(child);
+    // Build the wrapper chain from marker up to body
+    // Each entry: { element, beforeSiblings[], afterSiblings[] }
+    const wrapperChain = [];
+    let current = marker;
+    while (current.parentElement && current.parentElement !== fetchedDoc.body) {
+        const parent = current.parentElement;
+        const before = [];
+        const after = [];
+        let foundCurrent = false;
+
+        for (const sibling of parent.childNodes) {
+            if (sibling === current) {
+                foundCurrent = true;
+                continue;
+            }
+            if (!foundCurrent) {
+                before.push(sibling);
+            } else {
+                after.push(sibling);
+            }
         }
-        marker.replaceWith(contentSlot);
+
+        wrapperChain.push({
+            tag: parent.tagName.toLowerCase(),
+            attrs: Array.from(parent.attributes),
+            before,
+            after,
+        });
+
+        current = parent;
     }
 
-    // Copy body attributes (classes, etc.) from the fetched page
-    for (const attr of fetchedBody.attributes) {
-        if (attr.name !== 'data-etch-template-body') {
-            iframeDoc.body.setAttribute('data-etch-tpl-' + attr.name, attr.value);
+    // Collect body-level siblings (before/after the outermost wrapper ancestor)
+    const bodyBefore = [];
+    const bodyAfter = [];
+    if (current !== fetchedDoc.body) {
+        let foundCurrent = false;
+        for (const sibling of fetchedDoc.body.childNodes) {
+            if (sibling === current) {
+                foundCurrent = true;
+                continue;
+            }
+            if (!foundCurrent) {
+                bodyBefore.push(sibling);
+            } else {
+                bodyAfter.push(sibling);
+            }
         }
     }
 
-    // Move all fetched body children into the iframe body
-    // (importNode to cross document boundaries)
-    const bodyChildren = Array.from(fetchedBody.childNodes);
-    iframeDoc.body.textContent = '';
-    for (const child of bodyChildren) {
-        iframeDoc.body.appendChild(iframeDoc.importNode(child, true));
+    // Now build the structure in the iframe body.
+    // Collect existing editable children (keep references — don't clone)
+    const editableChildren = Array.from(iframeDoc.body.childNodes);
+
+    // Clear the body
+    while (iframeDoc.body.firstChild) {
+        iframeDoc.body.removeChild(iframeDoc.body.firstChild);
     }
 
-    // If we had a content slot, the importNode created a copy — we need to
-    // re-insert the real editable content (not the cloned version)
-    const importedSlot = iframeDoc.getElementById('etch-template-content-slot');
-    if (importedSlot && savedOriginalChildren) {
-        importedSlot.textContent = '';
-        for (const child of savedOriginalChildren) {
-            importedSlot.appendChild(child);
+    // Inject body-level "before" siblings (e.g. header)
+    for (const node of bodyBefore) {
+        const imported = iframeDoc.importNode(node, true);
+        imported.setAttribute?.('data-etch-template-part', 'true');
+        iframeDoc.body.appendChild(imported);
+    }
+
+    // Build the wrapper chain from outermost to innermost
+    // wrapperChain is ordered inner-to-outer, so reverse it
+    let innermost = null;
+    let outermost = null;
+
+    for (let i = wrapperChain.length - 1; i >= 0; i--) {
+        const level = wrapperChain[i];
+        const wrapper = iframeDoc.createElement(level.tag);
+
+        // Copy attributes (id, class, style, data-* etc.)
+        for (const attr of level.attrs) {
+            wrapper.setAttribute(attr.name, attr.value);
+        }
+        wrapper.setAttribute('data-etch-template-wrapper', 'true');
+
+        // Inject "before" siblings at this level
+        for (const node of level.before) {
+            const imported = iframeDoc.importNode(node, true);
+            imported.setAttribute?.('data-etch-template-part', 'true');
+            wrapper.appendChild(imported);
+        }
+
+        // Create a slot for the next level (or the content)
+        const slot = iframeDoc.createElement('div');
+        slot.id = 'etch-template-content-slot';
+        slot.setAttribute('data-etch-template-slot', 'true');
+        wrapper.appendChild(slot);
+
+        // Inject "after" siblings at this level
+        for (const node of level.after) {
+            const imported = iframeDoc.importNode(node, true);
+            imported.setAttribute?.('data-etch-template-part', 'true');
+            wrapper.appendChild(imported);
+        }
+
+        if (!outermost) {
+            outermost = wrapper;
+        }
+        if (innermost) {
+            // Replace the slot in the previous (outer) wrapper with this wrapper
+            const prevSlot = innermost.querySelector('#etch-template-content-slot');
+            if (prevSlot) {
+                prevSlot.replaceWith(wrapper);
+            }
+        }
+        innermost = wrapper;
+    }
+
+    // Find the innermost slot and put the editable content there
+    if (innermost) {
+        const finalSlot = innermost.querySelector('#etch-template-content-slot');
+        if (finalSlot) {
+            // Move (not clone!) original editable children into the slot
+            for (const child of editableChildren) {
+                finalSlot.appendChild(child);
+            }
+        }
+        iframeDoc.body.appendChild(outermost);
+    } else {
+        // No wrapper chain — just put content back
+        for (const child of editableChildren) {
+            iframeDoc.body.appendChild(child);
         }
     }
 
-    // Mark template parts as non-interactive
-    if (importedSlot) {
-        markTemplateParts(iframeDoc.body, 'etch-template-content-slot');
+    // Inject body-level "after" siblings (e.g. footer)
+    for (const node of bodyAfter) {
+        const imported = iframeDoc.importNode(node, true);
+        imported.setAttribute?.('data-etch-template-part', 'true');
+        iframeDoc.body.appendChild(imported);
     }
-}
-
-/**
- * Mark all elements that are NOT ancestors/descendants of the content slot
- * as template parts (non-interactive).
- */
-function markTemplateParts(root, contentSlotId) {
-    const contentSlot = root.querySelector('#' + contentSlotId);
-    if (!contentSlot) return;
-
-    // Build set of ancestor elements from content slot to root
-    const ancestors = new Set();
-    let el = contentSlot;
-    while (el && el !== root) {
-        ancestors.add(el);
-        el = el.parentElement;
-    }
-
-    // Walk all elements — anything not an ancestor of or inside the content slot is template
-    root.querySelectorAll('*').forEach(node => {
-        if (node.id === contentSlotId) return;
-        if (ancestors.has(node)) return;
-        if (contentSlot.contains(node)) return;
-        node.setAttribute('data-etch-template-part', 'true');
-    });
 }
 
 function removeTemplateShell(iframeDoc) {
@@ -244,25 +329,20 @@ function removeTemplateShell(iframeDoc) {
     // Remove injected template stylesheets from head
     iframeDoc.head.querySelectorAll('[data-etch-template-style]').forEach(el => el.remove());
 
-    // Remove body attribute copies
-    for (const attr of [...iframeDoc.body.attributes]) {
-        if (attr.name.startsWith('data-etch-tpl-')) {
-            iframeDoc.body.removeAttribute(attr.name);
+    // Pull editable content out of the slot and restore to body root
+    const slot = iframeDoc.getElementById('etch-template-content-slot');
+    if (slot) {
+        const children = Array.from(slot.childNodes);
+
+        // Remove all template injected content
+        while (iframeDoc.body.firstChild) {
+            iframeDoc.body.removeChild(iframeDoc.body.firstChild);
         }
-    }
 
-    // Restore original children if we saved them
-    if (savedOriginalChildren && iframeDoc.body) {
-        const contentSlot = iframeDoc.getElementById('etch-template-content-slot');
-        const children = contentSlot
-            ? Array.from(contentSlot.childNodes)
-            : savedOriginalChildren;
-
-        iframeDoc.body.textContent = '';
+        // Restore the editable children directly to body
         for (const child of children) {
             iframeDoc.body.appendChild(child);
         }
-        savedOriginalChildren = null;
     }
 }
 
