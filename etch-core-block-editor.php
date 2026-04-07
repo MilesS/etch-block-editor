@@ -176,13 +176,13 @@ add_action('rest_api_init', function () {
             }
 
             if (in_array($post->post_type, ['wp_template', 'wp_template_part'], true)) {
-                return new WP_REST_Response(['before' => '', 'after' => '', 'reason' => 'already_template'], 200);
+                return new WP_REST_Response(['html' => '', 'styles' => '', 'reason' => 'already_template'], 200);
             }
 
             $template = etch_core_resolve_template_for_post($post);
 
             if (!$template) {
-                return new WP_REST_Response(['before' => '', 'after' => '', 'reason' => 'no_template_found'], 200);
+                return new WP_REST_Response(['html' => '', 'styles' => '', 'reason' => 'no_template_found'], 200);
             }
 
             // Set up the global post context so template rendering can reference it
@@ -191,31 +191,46 @@ add_action('rest_api_init', function () {
             $wp_query = new WP_Query(['p' => $post_id, 'post_type' => $post->post_type]);
             $wp_query->the_post();
 
-            // Render the template HTML
+            // Replace core/post-content with a unique marker in the template content
+            $marker_id = 'etch-template-content-marker';
+            $marker_html = '<div id="' . $marker_id . '"></div>';
             $template_content = $template->content;
 
-            // Split at core/post-content block
-            $marker = '<!-- wp:post-content';
-            $marker_pos = strpos($template_content, $marker);
+            // Replace the post-content block (self-closing or with closing tag) with our marker
+            $template_content = preg_replace(
+                '/<!-- wp:post-content.*?\/-->|<!-- wp:post-content.*?-->.*?<!-- \/wp:post-content -->/s',
+                $marker_html,
+                $template_content
+            );
 
-            $before_html = '';
-            $after_html = '';
+            // Capture styles that get enqueued during do_blocks
+            $styles_before = array_keys(wp_styles()->registered);
+            $rendered_html = do_blocks($template_content);
+            $styles_after = wp_styles()->registered;
 
-            if ($marker_pos !== false) {
-                $before_blocks = substr($template_content, 0, $marker_pos);
-                // Find end of post-content block
-                $after_marker = strpos($template_content, '<!-- /wp:post-content -->', $marker_pos);
-                if ($after_marker !== false) {
-                    $after_blocks = substr($template_content, $after_marker + strlen('<!-- /wp:post-content -->'));
-                } else {
-                    // Self-closing post-content
-                    $close = strpos($template_content, '/-->', $marker_pos);
-                    $after_blocks = $close !== false ? substr($template_content, $close + 4) : '';
+            // Collect all block/theme stylesheets
+            $style_tags = '';
+            foreach ($styles_after as $handle => $style) {
+                if ($style->src) {
+                    $src = $style->src;
+                    // Make relative URLs absolute
+                    if (str_starts_with($src, '/')) {
+                        $src = site_url($src);
+                    }
+                    $style_tags .= '<link rel="stylesheet" href="' . esc_url($src) . '" />' . "\n";
                 }
-
-                $before_html = do_blocks($before_blocks);
-                $after_html = do_blocks($after_blocks);
+                // Include inline styles
+                if (!empty($style->extra['after'])) {
+                    $style_tags .= '<style>' . implode("\n", $style->extra['after']) . '</style>' . "\n";
+                }
             }
+
+            // Also capture global styles (theme.json output)
+            ob_start();
+            wp_enqueue_global_styles();
+            wp_print_styles(['global-styles', 'wp-block-library']);
+            $global_styles = ob_get_clean();
+            $style_tags = $global_styles . $style_tags;
 
             // Restore original query
             $wp_query = $original_query;
@@ -225,8 +240,9 @@ add_action('rest_api_init', function () {
                 'templateId' => $template->wp_id,
                 'templateSlug' => $template->slug,
                 'templateTitle' => $template->title,
-                'before' => $before_html,
-                'after' => $after_html,
+                'html' => $rendered_html,
+                'styles' => $style_tags,
+                'markerId' => $marker_id,
             ], 200);
         },
         'permission_callback' => function (WP_REST_Request $request) {

@@ -96,7 +96,7 @@ async function enablePreview(postId, restUrl, nonce) {
         templateShellCache = await fetchTemplateShell(postId, restUrl, nonce);
     }
 
-    if (!templateShellCache?.before && !templateShellCache?.after) {
+    if (!templateShellCache?.html) {
         showNotice('No template found for this post');
         return;
     }
@@ -128,37 +128,114 @@ function updateToggleButton(active) {
 
 // ---- Template Shell Injection ----
 
+// Store original children so we can restore them on disable
+let savedOriginalChildren = null;
+
 function injectTemplateShell(iframeDoc, shell) {
     removeTemplateShell(iframeDoc);
     injectPreviewStyles(iframeDoc);
 
-    if (shell.before) {
-        const beforeEl = iframeDoc.createElement('div');
-        beforeEl.id = 'etch-template-before';
-        beforeEl.className = 'etch-template-shell';
-        // Content is server-rendered template HTML from our own endpoint (do_blocks output)
-        beforeEl.innerHTML = shell.before; // eslint-disable-line no-unsanitized/property
-        iframeDoc.body.insertBefore(beforeEl, iframeDoc.body.firstChild);
+    // Inject template stylesheets into iframe head
+    if (shell.styles) {
+        const styleContainer = iframeDoc.createElement('div');
+        // Styles are server-rendered <link> and <style> tags from our PHP endpoint
+        styleContainer.innerHTML = shell.styles; // eslint-disable-line no-unsanitized/property
+        // Move each child into the head, tagged for cleanup
+        while (styleContainer.firstChild) {
+            const node = styleContainer.firstChild;
+            if (node.nodeType === 1) {
+                node.setAttribute('data-etch-template-style', 'true');
+            }
+            iframeDoc.head.appendChild(node);
+        }
     }
 
-    if (shell.after) {
-        const afterEl = iframeDoc.createElement('div');
-        afterEl.id = 'etch-template-after';
-        afterEl.className = 'etch-template-shell';
-        // Content is server-rendered template HTML from our own endpoint (do_blocks output)
-        afterEl.innerHTML = shell.after; // eslint-disable-line no-unsanitized/property
-        iframeDoc.body.appendChild(afterEl);
+    // Save the original body children (the editable post content)
+    savedOriginalChildren = Array.from(iframeDoc.body.childNodes);
+
+    // Parse the full template HTML — it contains a marker div where content goes
+    const wrapper = iframeDoc.createElement('div');
+    wrapper.id = 'etch-template-wrapper';
+    // Full template HTML from our own PHP endpoint (do_blocks output)
+    wrapper.innerHTML = shell.html; // eslint-disable-line no-unsanitized/property
+
+    // Find the marker element
+    const markerId = shell.markerId || 'etch-template-content-marker';
+    const marker = wrapper.querySelector('#' + markerId);
+
+    if (marker) {
+        // Move the original editable content into the marker's position
+        const contentContainer = iframeDoc.createElement('div');
+        contentContainer.id = 'etch-template-content-slot';
+        for (const child of savedOriginalChildren) {
+            contentContainer.appendChild(child);
+        }
+        marker.replaceWith(contentContainer);
+    }
+
+    // Mark template portions as non-interactive
+    wrapper.querySelectorAll(':scope > *').forEach(el => {
+        if (el.id !== 'etch-template-content-slot') {
+            // Walk up to find direct children that aren't the content slot
+            el.setAttribute('data-etch-template-part', 'true');
+        }
+    });
+
+    // Also mark nested template parts (everything not inside the content slot)
+    markTemplateParts(wrapper, 'etch-template-content-slot');
+
+    // Replace body contents with the wrapped template
+    iframeDoc.body.textContent = '';
+    while (wrapper.firstChild) {
+        iframeDoc.body.appendChild(wrapper.firstChild);
     }
 }
 
-function removeTemplateShell(iframeDoc) {
-    const before = iframeDoc.getElementById('etch-template-before');
-    const after = iframeDoc.getElementById('etch-template-after');
-    const styles = iframeDoc.getElementById('etch-template-preview-styles');
+/**
+ * Mark all elements that are NOT ancestors/descendants of the content slot
+ * as template parts (non-interactive).
+ */
+function markTemplateParts(root, contentSlotId) {
+    const contentSlot = root.querySelector('#' + contentSlotId);
+    if (!contentSlot) return;
 
-    if (before) before.remove();
-    if (after) after.remove();
-    if (styles) styles.remove();
+    // Build set of ancestor elements from content slot to root
+    const ancestors = new Set();
+    let el = contentSlot;
+    while (el && el !== root) {
+        ancestors.add(el);
+        el = el.parentElement;
+    }
+
+    // Walk all elements — anything not an ancestor of or inside the content slot is template
+    root.querySelectorAll('*').forEach(node => {
+        if (node.id === contentSlotId) return;
+        if (ancestors.has(node)) return;
+        if (contentSlot.contains(node)) return;
+        node.setAttribute('data-etch-template-part', 'true');
+    });
+}
+
+function removeTemplateShell(iframeDoc) {
+    const previewStyles = iframeDoc.getElementById('etch-template-preview-styles');
+    if (previewStyles) previewStyles.remove();
+
+    // Remove injected template stylesheets from head
+    iframeDoc.head.querySelectorAll('[data-etch-template-style]').forEach(el => el.remove());
+
+    // Restore original children if we saved them
+    if (savedOriginalChildren && iframeDoc.body) {
+        const contentSlot = iframeDoc.getElementById('etch-template-content-slot');
+        if (contentSlot) {
+            // Pull children out of the content slot back to body root
+            const children = Array.from(contentSlot.childNodes);
+            iframeDoc.body.textContent = '';
+            for (const child of children) {
+                iframeDoc.body.appendChild(child);
+            }
+        }
+        savedOriginalChildren = null;
+    }
 }
 
 function injectPreviewStyles(iframeDoc) {
@@ -167,53 +244,34 @@ function injectPreviewStyles(iframeDoc) {
     const style = iframeDoc.createElement('style');
     style.id = 'etch-template-preview-styles';
     style.textContent = `
-        .etch-template-shell {
-            pointer-events: none;
-            opacity: 0.6;
-            position: relative;
-            transition: opacity 0.2s ease;
-        }
-
-        .etch-template-shell:hover {
-            opacity: 0.8;
-        }
-
-        .etch-template-shell::after {
-            content: 'TEMPLATE';
-            position: absolute;
-            top: 8px;
-            right: 8px;
-            font-size: 9px;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            color: rgba(100, 100, 255, 0.6);
-            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-            background: rgba(255, 255, 255, 0.9);
-            padding: 2px 6px;
-            border-radius: 3px;
-            pointer-events: none;
-            z-index: 10;
-        }
-
-        #etch-template-before {
-            border-bottom: 2px dashed rgba(100, 100, 255, 0.3);
-            padding-bottom: 4px;
-            margin-bottom: 4px;
-        }
-
-        #etch-template-after {
-            border-top: 2px dashed rgba(100, 100, 255, 0.3);
-            padding-top: 4px;
-            margin-top: 4px;
-        }
-
-        .etch-template-shell a,
-        .etch-template-shell button {
+        /* Template parts are non-interactive and visually dimmed */
+        [data-etch-template-part] {
             pointer-events: none !important;
+            opacity: 0.55;
+            transition: opacity 0.2s ease;
+            position: relative;
         }
 
-        .etch-template-shell img { max-width: 100%; height: auto; }
-        .etch-template-shell video { max-width: 100%; height: auto; }
+        [data-etch-template-part]:hover {
+            opacity: 0.75;
+        }
+
+        [data-etch-template-part] a,
+        [data-etch-template-part] button {
+            pointer-events: none !important;
+            cursor: default !important;
+        }
+
+        [data-etch-template-part] img { max-width: 100%; height: auto; }
+        [data-etch-template-part] video { max-width: 100%; height: auto; }
+
+        /* Content slot separator */
+        #etch-template-content-slot {
+            position: relative;
+            border-top: 2px dashed rgba(100, 100, 255, 0.25);
+            border-bottom: 2px dashed rgba(100, 100, 255, 0.25);
+            padding: 4px 0;
+        }
     `;
     iframeDoc.head.appendChild(style);
 }
