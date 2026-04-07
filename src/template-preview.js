@@ -271,12 +271,6 @@ function injectPreviewStyles(iframeDoc) {
     style.textContent = `
         [data-etch-template-part] {
             pointer-events: none !important;
-            opacity: 0.55;
-            transition: opacity 0.2s ease;
-        }
-
-        [data-etch-template-part]:hover {
-            opacity: 0.75;
         }
 
         [data-etch-template-part] a,
