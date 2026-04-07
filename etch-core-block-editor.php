@@ -249,12 +249,13 @@ function etch_core_resolve_template_for_post(WP_Post $post): ?WP_Block_Template 
 
 // When ?etch_template_preview=1, wrap the post content area with a marker
 // so the JS can find it and replace it with editable content.
+// Priority 20 runs after Etch's ContentWrapper (priority 10) which strips the outer div.
 add_filter('render_block_core/post-content', function ($block_content, $block) {
     if (!isset($_GET['etch_template_preview']) || $_GET['etch_template_preview'] !== '1') {
         return $block_content;
     }
     return '<div id="etch-content-marker">' . $block_content . '</div>';
-}, 10, 2);
+}, 20, 2);
 
 // REST endpoint: store pending core block edits
 add_action('rest_api_init', function () {
