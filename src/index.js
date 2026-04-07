@@ -2,6 +2,7 @@ import './styles/etch-overrides.css';
 import { initPassthroughEnhancer } from './enhancer';
 import { initBlockInserter } from './inserter';
 import { initBlockConverter } from './converter';
+import { initTemplatePreview } from './template-preview';
 
 // Wait for DOM ready, then initialize
 if (document.readyState === 'loading') {
@@ -16,6 +17,7 @@ function init() {
     // Initialize settings bar buttons
     initBlockInserter();
     initBlockConverter();
+    initTemplatePreview();
 
     // Wait for the Etch iframe to appear
     waitForIframe().then((iframe) => {

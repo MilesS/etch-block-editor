@@ -3,7 +3,7 @@
  * Plugin Name: Etch Block Editor
  * Plugin URI: https://github.com/MilesS/etch-block-editor
  * Description: Display and edit core Gutenberg blocks inside the Etch visual editor.
- * Version: 1.5.1
+ * Version: 1.6.0
  * Requires PHP: 8.1
  * Author: Miles Sebesta
  * Author URI: https://milessebesta.com
@@ -94,8 +94,20 @@ add_action('wp_enqueue_scripts', function () {
         }
     }
 
+    $original_post_id = isset($_GET['original_post_id']) ? absint($_GET['original_post_id']) : 0;
+    if ($original_post_id && !current_user_can('edit_post', $original_post_id)) {
+        $original_post_id = 0;
+    }
+
+    $is_template = false;
+    if ($post_id) {
+        $is_template = in_array(get_post_type($post_id), ['wp_template', 'wp_template_part'], true);
+    }
+
     wp_localize_script('etch-core-block-editor', 'etchCoreBlockEditor', [
         'postId' => $post_id,
+        'originalPostId' => $original_post_id,
+        'isTemplate' => $is_template,
         'restUrl' => rest_url(),
         'restBase' => $rest_base,
         'nonce' => wp_create_nonce('wp_rest'),
@@ -109,6 +121,165 @@ add_action('wp_enqueue_scripts', function () {
         $asset['version']
     );
 });
+
+// REST endpoint: get template info for a post
+add_action('rest_api_init', function () {
+    register_rest_route('etch-core-block-editor/v1', '/post-template/(?P<post_id>\d+)', [
+        'methods' => 'GET',
+        'callback' => function (WP_REST_Request $request) {
+            $post_id = absint($request->get_param('post_id'));
+            $post = get_post($post_id);
+
+            if (!$post) {
+                return new WP_Error('invalid_post', 'Post not found', ['status' => 404]);
+            }
+
+            $post_type = $post->post_type;
+
+            // Don't resolve templates for template post types
+            if (in_array($post_type, ['wp_template', 'wp_template_part'], true)) {
+                return new WP_REST_Response(['templateId' => null, 'reason' => 'already_template'], 200);
+            }
+
+            // Find the matching template for this post
+            $template = etch_core_resolve_template_for_post($post);
+
+            if (!$template) {
+                return new WP_REST_Response(['templateId' => null, 'reason' => 'no_template_found'], 200);
+            }
+
+            return new WP_REST_Response([
+                'templateId' => $template->wp_id,
+                'templateSlug' => $template->slug,
+                'templateTitle' => $template->title,
+                'editUrl' => add_query_arg([
+                    'etch' => 'magic',
+                    'post_id' => $template->wp_id,
+                    'original_post_id' => $post_id,
+                ], home_url('/')),
+            ], 200);
+        },
+        'permission_callback' => function (WP_REST_Request $request) {
+            $post_id = absint($request->get_param('post_id'));
+            return current_user_can('edit_post', $post_id);
+        },
+    ]);
+
+    register_rest_route('etch-core-block-editor/v1', '/template-shell/(?P<post_id>\d+)', [
+        'methods' => 'GET',
+        'callback' => function (WP_REST_Request $request) {
+            $post_id = absint($request->get_param('post_id'));
+            $post = get_post($post_id);
+
+            if (!$post) {
+                return new WP_Error('invalid_post', 'Post not found', ['status' => 404]);
+            }
+
+            if (in_array($post->post_type, ['wp_template', 'wp_template_part'], true)) {
+                return new WP_REST_Response(['before' => '', 'after' => '', 'reason' => 'already_template'], 200);
+            }
+
+            $template = etch_core_resolve_template_for_post($post);
+
+            if (!$template) {
+                return new WP_REST_Response(['before' => '', 'after' => '', 'reason' => 'no_template_found'], 200);
+            }
+
+            // Set up the global post context so template rendering can reference it
+            global $wp_query;
+            $original_query = $wp_query;
+            $wp_query = new WP_Query(['p' => $post_id, 'post_type' => $post->post_type]);
+            $wp_query->the_post();
+
+            // Render the template HTML
+            $template_content = $template->content;
+
+            // Split at core/post-content block
+            $marker = '<!-- wp:post-content';
+            $marker_pos = strpos($template_content, $marker);
+
+            $before_html = '';
+            $after_html = '';
+
+            if ($marker_pos !== false) {
+                $before_blocks = substr($template_content, 0, $marker_pos);
+                // Find end of post-content block
+                $after_marker = strpos($template_content, '<!-- /wp:post-content -->', $marker_pos);
+                if ($after_marker !== false) {
+                    $after_blocks = substr($template_content, $after_marker + strlen('<!-- /wp:post-content -->'));
+                } else {
+                    // Self-closing post-content
+                    $close = strpos($template_content, '/-->', $marker_pos);
+                    $after_blocks = $close !== false ? substr($template_content, $close + 4) : '';
+                }
+
+                $before_html = do_blocks($before_blocks);
+                $after_html = do_blocks($after_blocks);
+            }
+
+            // Restore original query
+            $wp_query = $original_query;
+            wp_reset_postdata();
+
+            return new WP_REST_Response([
+                'templateId' => $template->wp_id,
+                'templateSlug' => $template->slug,
+                'templateTitle' => $template->title,
+                'before' => $before_html,
+                'after' => $after_html,
+            ], 200);
+        },
+        'permission_callback' => function (WP_REST_Request $request) {
+            $post_id = absint($request->get_param('post_id'));
+            return current_user_can('edit_post', $post_id);
+        },
+    ]);
+});
+
+/**
+ * Resolve the block template that applies to a given post.
+ */
+function etch_core_resolve_template_for_post(WP_Post $post): ?WP_Block_Template {
+    $post_type = $post->post_type;
+
+    // Check for a custom template assignment
+    $custom_template = get_page_template_slug($post);
+
+    $slugs_to_try = [];
+
+    if ($custom_template) {
+        $slugs_to_try[] = $custom_template;
+    }
+
+    // Build template hierarchy based on post type
+    if ($post_type === 'page') {
+        $slugs_to_try[] = 'page-' . $post->post_name;
+        $slugs_to_try[] = 'page-' . $post->ID;
+        $slugs_to_try[] = 'page';
+    } else {
+        $slugs_to_try[] = 'single-' . $post_type . '-' . $post->post_name;
+        $slugs_to_try[] = 'single-' . $post_type;
+        $slugs_to_try[] = 'single';
+    }
+
+    $slugs_to_try[] = 'singular';
+    $slugs_to_try[] = 'index';
+
+    $all_templates = get_block_templates([], 'wp_template');
+
+    $templates_by_slug = [];
+    foreach ($all_templates as $tpl) {
+        $templates_by_slug[$tpl->slug] = $tpl;
+    }
+
+    foreach ($slugs_to_try as $slug) {
+        if (isset($templates_by_slug[$slug])) {
+            return $templates_by_slug[$slug];
+        }
+    }
+
+    return null;
+}
 
 // REST endpoint: store pending core block edits
 add_action('rest_api_init', function () {
