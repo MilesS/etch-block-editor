@@ -89,18 +89,23 @@ export function initPassthroughEnhancer(iframe) {
 
 async function fetchAndEnhance(iframeDoc, postId, restUrl, nonce) {
     try {
-        const restBase = window.etchCoreBlockEditor?.restBase || 'posts';
-        const response = await fetch(`${restUrl}wp/v2/${restBase}/${postId}?context=edit`, {
-            headers: { 'X-WP-Nonce': nonce }
-        });
-        const data = response.ok ? await response.json() : null;
+        // Use rawContent from PHP if available (works for all post types),
+        // fall back to REST API fetch
+        let rawContent = window.etchCoreBlockEditor?.rawContent || '';
 
-        if (!data?.content?.raw) {
+        if (!rawContent) {
+            const restBase = window.etchCoreBlockEditor?.restBase || 'posts';
+            const response = await fetch(`${restUrl}wp/v2/${restBase}/${postId}?context=edit`, {
+                headers: { 'X-WP-Nonce': nonce }
+            });
+            const data = response.ok ? await response.json() : null;
+            rawContent = data?.content?.raw || '';
+        }
+
+        if (!rawContent) {
             console.warn('[etch-core-block-editor] Could not fetch post content');
             return;
         }
-
-        const rawContent = data.content.raw;
         const parsedBlocks = parseBlocksFromContent(rawContent);
 
         const passthroughs = Array.from(iframeDoc.querySelectorAll('.etch-passthrough-block'));
