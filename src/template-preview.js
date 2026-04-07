@@ -93,12 +93,29 @@ async function enablePreview(postId, restUrl, nonce) {
     const iframeDoc = iframe.contentDocument;
 
     if (!templateShellCache) {
-        templateShellCache = await fetchTemplateShell(postId, restUrl, nonce);
-    }
+        // Step 1: get the preview permalink from our REST endpoint
+        const shellInfo = await fetchTemplateShell(postId, restUrl, nonce);
+        if (!shellInfo?.permalink) {
+            showNotice('No template found for this post');
+            return;
+        }
 
-    if (!templateShellCache?.html) {
-        showNotice('No template found for this post');
-        return;
+        // Step 2: fetch the actual rendered frontend page
+        try {
+            const pageResponse = await fetch(shellInfo.permalink, {
+                credentials: 'same-origin',
+            });
+            if (!pageResponse.ok) {
+                showNotice('Failed to load template preview');
+                return;
+            }
+            const pageHtml = await pageResponse.text();
+            templateShellCache = { html: pageHtml, ...shellInfo };
+        } catch (err) {
+            console.error('[etch-core-block-editor] Failed to fetch template page:', err);
+            showNotice('Failed to load template preview');
+            return;
+        }
     }
 
     isPreviewActive = true;
@@ -128,66 +145,70 @@ function updateToggleButton(active) {
 
 // ---- Template Shell Injection ----
 
-// Store original children so we can restore them on disable
+// Store original body children so we can restore on disable
 let savedOriginalChildren = null;
 
 function injectTemplateShell(iframeDoc, shell) {
     removeTemplateShell(iframeDoc);
     injectPreviewStyles(iframeDoc);
 
-    // Inject template stylesheets into iframe head
-    if (shell.styles) {
-        const styleContainer = iframeDoc.createElement('div');
-        // Styles are server-rendered <link> and <style> tags from our PHP endpoint
-        styleContainer.innerHTML = shell.styles; // eslint-disable-line no-unsanitized/property
-        // Move each child into the head, tagged for cleanup
-        while (styleContainer.firstChild) {
-            const node = styleContainer.firstChild;
-            if (node.nodeType === 1) {
-                node.setAttribute('data-etch-template-style', 'true');
-            }
-            iframeDoc.head.appendChild(node);
-        }
-    }
+    // Parse the fetched full page HTML
+    const parser = new DOMParser();
+    const fetchedDoc = parser.parseFromString(shell.html, 'text/html');
+
+    // Inject all <link rel="stylesheet"> and <style> tags from the fetched page
+    const headStyles = fetchedDoc.querySelectorAll('link[rel="stylesheet"], style');
+    headStyles.forEach(el => {
+        const clone = iframeDoc.importNode(el, true);
+        clone.setAttribute('data-etch-template-style', 'true');
+        iframeDoc.head.appendChild(clone);
+    });
 
     // Save the original body children (the editable post content)
     savedOriginalChildren = Array.from(iframeDoc.body.childNodes);
 
-    // Parse the full template HTML — it contains a marker div where content goes
-    const wrapper = iframeDoc.createElement('div');
-    wrapper.id = 'etch-template-wrapper';
-    // Full template HTML from our own PHP endpoint (do_blocks output)
-    wrapper.innerHTML = shell.html; // eslint-disable-line no-unsanitized/property
-
-    // Find the marker element
-    const markerId = shell.markerId || 'etch-template-content-marker';
-    const marker = wrapper.querySelector('#' + markerId);
+    // Find the content marker in the fetched page body
+    const marker = fetchedDoc.getElementById('etch-content-marker');
+    const fetchedBody = fetchedDoc.body;
 
     if (marker) {
-        // Move the original editable content into the marker's position
-        const contentContainer = iframeDoc.createElement('div');
-        contentContainer.id = 'etch-template-content-slot';
+        // Replace the marker contents with the editable content
+        const contentSlot = iframeDoc.createElement('div');
+        contentSlot.id = 'etch-template-content-slot';
         for (const child of savedOriginalChildren) {
-            contentContainer.appendChild(child);
+            contentSlot.appendChild(child);
         }
-        marker.replaceWith(contentContainer);
+        marker.replaceWith(contentSlot);
     }
 
-    // Mark template portions as non-interactive
-    wrapper.querySelectorAll(':scope > *').forEach(el => {
-        if (el.id !== 'etch-template-content-slot') {
-            // Walk up to find direct children that aren't the content slot
-            el.setAttribute('data-etch-template-part', 'true');
+    // Copy body attributes (classes, etc.) from the fetched page
+    for (const attr of fetchedBody.attributes) {
+        if (attr.name !== 'data-etch-template-body') {
+            iframeDoc.body.setAttribute('data-etch-tpl-' + attr.name, attr.value);
         }
-    });
+    }
 
-    // Also mark nested template parts (everything not inside the content slot)
-    markTemplateParts(wrapper, 'etch-template-content-slot');
-
-    // Replace body contents with the wrapped template
+    // Move all fetched body children into the iframe body
+    // (importNode to cross document boundaries)
+    const bodyChildren = Array.from(fetchedBody.childNodes);
     iframeDoc.body.textContent = '';
-    while (wrapper.firstChild) {
-        iframeDoc.body.appendChild(wrapper.firstChild);
+    for (const child of bodyChildren) {
+        iframeDoc.body.appendChild(iframeDoc.importNode(child, true));
+    }
+
+    // If we had a content slot, the importNode created a copy — we need to
+    // re-insert the real editable content (not the cloned version)
+    const importedSlot = iframeDoc.getElementById('etch-template-content-slot');
+    if (importedSlot && savedOriginalChildren) {
+        importedSlot.textContent = '';
+        for (const child of savedOriginalChildren) {
+            importedSlot.appendChild(child);
+        }
+    }
+
+    // Mark template parts as non-interactive
+    if (importedSlot) {
+        markTemplateParts(iframeDoc.body, 'etch-template-content-slot');
     }
 }
 
@@ -223,16 +244,23 @@ function removeTemplateShell(iframeDoc) {
     // Remove injected template stylesheets from head
     iframeDoc.head.querySelectorAll('[data-etch-template-style]').forEach(el => el.remove());
 
+    // Remove body attribute copies
+    for (const attr of [...iframeDoc.body.attributes]) {
+        if (attr.name.startsWith('data-etch-tpl-')) {
+            iframeDoc.body.removeAttribute(attr.name);
+        }
+    }
+
     // Restore original children if we saved them
     if (savedOriginalChildren && iframeDoc.body) {
         const contentSlot = iframeDoc.getElementById('etch-template-content-slot');
-        if (contentSlot) {
-            // Pull children out of the content slot back to body root
-            const children = Array.from(contentSlot.childNodes);
-            iframeDoc.body.textContent = '';
-            for (const child of children) {
-                iframeDoc.body.appendChild(child);
-            }
+        const children = contentSlot
+            ? Array.from(contentSlot.childNodes)
+            : savedOriginalChildren;
+
+        iframeDoc.body.textContent = '';
+        for (const child of children) {
+            iframeDoc.body.appendChild(child);
         }
         savedOriginalChildren = null;
     }

@@ -176,73 +176,23 @@ add_action('rest_api_init', function () {
             }
 
             if (in_array($post->post_type, ['wp_template', 'wp_template_part'], true)) {
-                return new WP_REST_Response(['html' => '', 'styles' => '', 'reason' => 'already_template'], 200);
+                return new WP_REST_Response(['permalink' => '', 'reason' => 'already_template'], 200);
             }
 
             $template = etch_core_resolve_template_for_post($post);
+            $permalink = get_permalink($post_id);
 
-            if (!$template) {
-                return new WP_REST_Response(['html' => '', 'styles' => '', 'reason' => 'no_template_found'], 200);
+            if (!$permalink) {
+                return new WP_REST_Response(['permalink' => '', 'reason' => 'no_permalink'], 200);
             }
 
-            // Set up the global post context so template rendering can reference it
-            global $wp_query;
-            $original_query = $wp_query;
-            $wp_query = new WP_Query(['p' => $post_id, 'post_type' => $post->post_type]);
-            $wp_query->the_post();
-
-            // Replace core/post-content with a unique marker in the template content
-            $marker_id = 'etch-template-content-marker';
-            $marker_html = '<div id="' . $marker_id . '"></div>';
-            $template_content = $template->content;
-
-            // Replace the post-content block (self-closing or with closing tag) with our marker
-            $template_content = preg_replace(
-                '/<!-- wp:post-content.*?\/-->|<!-- wp:post-content.*?-->.*?<!-- \/wp:post-content -->/s',
-                $marker_html,
-                $template_content
-            );
-
-            // Capture styles that get enqueued during do_blocks
-            $styles_before = array_keys(wp_styles()->registered);
-            $rendered_html = do_blocks($template_content);
-            $styles_after = wp_styles()->registered;
-
-            // Collect all block/theme stylesheets
-            $style_tags = '';
-            foreach ($styles_after as $handle => $style) {
-                if ($style->src) {
-                    $src = $style->src;
-                    // Make relative URLs absolute
-                    if (str_starts_with($src, '/')) {
-                        $src = site_url($src);
-                    }
-                    $style_tags .= '<link rel="stylesheet" href="' . esc_url($src) . '" />' . "\n";
-                }
-                // Include inline styles
-                if (!empty($style->extra['after'])) {
-                    $style_tags .= '<style>' . implode("\n", $style->extra['after']) . '</style>' . "\n";
-                }
-            }
-
-            // Also capture global styles (theme.json output)
-            ob_start();
-            wp_enqueue_global_styles();
-            wp_print_styles(['global-styles', 'wp-block-library']);
-            $global_styles = ob_get_clean();
-            $style_tags = $global_styles . $style_tags;
-
-            // Restore original query
-            $wp_query = $original_query;
-            wp_reset_postdata();
+            // Add marker param so our filter wraps the post content
+            $preview_url = add_query_arg('etch_template_preview', '1', $permalink);
 
             return new WP_REST_Response([
-                'templateId' => $template->wp_id,
-                'templateSlug' => $template->slug,
-                'templateTitle' => $template->title,
-                'html' => $rendered_html,
-                'styles' => $style_tags,
-                'markerId' => $marker_id,
+                'templateId' => $template ? $template->wp_id : null,
+                'templateSlug' => $template ? $template->slug : null,
+                'permalink' => $preview_url,
             ], 200);
         },
         'permission_callback' => function (WP_REST_Request $request) {
@@ -296,6 +246,15 @@ function etch_core_resolve_template_for_post(WP_Post $post): ?WP_Block_Template 
 
     return null;
 }
+
+// When ?etch_template_preview=1, wrap the post content area with a marker
+// so the JS can find it and replace it with editable content.
+add_filter('render_block_core/post-content', function ($block_content, $block) {
+    if (!isset($_GET['etch_template_preview']) || $_GET['etch_template_preview'] !== '1') {
+        return $block_content;
+    }
+    return '<div id="etch-content-marker">' . $block_content . '</div>';
+}, 10, 2);
 
 // REST endpoint: store pending core block edits
 add_action('rest_api_init', function () {
